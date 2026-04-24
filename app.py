@@ -371,9 +371,9 @@ if uploaded_file is not None:
         with ctrl[3]:
             st.slider("V min", 0, 255, 137, key="v_min")
         with ctrl[4]:
-            st.number_input("mm/quad (X)", 0.1, 5.0, mm_per_grid, 0.1, key="mm_per_grid")
+            st.number_input("mm/quad (X)", value=mm_per_grid, step=0.1, format="%.1f", key="mm_per_grid")
         with ctrl[5]:
-            st.number_input("μm/quad (Y)", 0.1, 5.0, um_per_grid, 0.1, key="um_per_grid")
+            st.number_input("μm/quad (Y)", value=um_per_grid, step=0.1, format="%.1f", key="um_per_grid")
         with ctrl[6]:
             st.checkbox("Baseline", value=True, key="show_baseline")
         
