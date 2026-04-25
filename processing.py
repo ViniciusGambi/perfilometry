@@ -334,29 +334,54 @@ def auto_adjust_parameters(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y):
                         }
     
     # ========================================
-    # FASE 2: Refinamento com passo de 1
+    # FASE 2: Refinamento com coordinate descent (passo de 1)
     # ========================================
-    # Define faixas ao redor do melhor (±10 para H, ±20 para S/V)
-    h_min_fine = range(max(30, best_params['h_min'] - 10), min(80, best_params['h_min'] + 11), 1)
-    h_max_fine = range(max(60, best_params['h_max'] - 10), min(110, best_params['h_max'] + 11), 1)
-    s_min_fine = range(max(30, best_params['s_min'] - 20), min(220, best_params['s_min'] + 21), 1)
-    v_min_fine = range(max(30, best_params['v_min'] - 20), min(220, best_params['v_min'] + 21), 1)
+    # Muito mais rápido: otimiza um parâmetro por vez
     
-    for h_min in h_min_fine:
-        for h_max in h_max_fine:
-            if h_max <= h_min:
-                continue
-            for s_min in s_min_fine:
-                for v_min in v_min_fine:
-                    area = evaluate(h_min, h_max, s_min, v_min)
-                    if area > best_area:
-                        best_area = area
-                        best_params = {
-                            'h_min': h_min,
-                            'h_max': h_max,
-                            's_min': s_min,
-                            'v_min': v_min
-                        }
+    params = best_params.copy()
+    improved = True
+    
+    while improved:
+        improved = False
+        
+        for param_name in ['h_min', 'h_max', 's_min', 'v_min']:
+            # Define limites
+            if param_name == 'h_min':
+                min_val, max_val = 30, 75
+            elif param_name == 'h_max':
+                min_val, max_val = 65, 110
+            else:
+                min_val, max_val = 30, 220
+            
+            # Tenta diminuir
+            while params[param_name] > min_val:
+                params[param_name] -= 1
+                if param_name == 'h_min' and params['h_max'] <= params['h_min']:
+                    params[param_name] += 1
+                    break
+                area = evaluate(params['h_min'], params['h_max'], params['s_min'], params['v_min'])
+                if area > best_area:
+                    best_area = area
+                    best_params = params.copy()
+                    improved = True
+                else:
+                    params[param_name] += 1
+                    break
+            
+            # Tenta aumentar
+            while params[param_name] < max_val:
+                params[param_name] += 1
+                if param_name == 'h_max' and params['h_max'] <= params['h_min']:
+                    params[param_name] -= 1
+                    break
+                area = evaluate(params['h_min'], params['h_max'], params['s_min'], params['v_min'])
+                if area > best_area:
+                    best_area = area
+                    best_params = params.copy()
+                    improved = True
+                else:
+                    params[param_name] -= 1
+                    break
     
     # Calcula pixels finais
     profile, mask_green = detect_green_profile(
