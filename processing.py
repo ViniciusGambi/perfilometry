@@ -267,6 +267,91 @@ def crop_graph(img):
     return img[CROP_Y_TOP:y_bottom, CROP_X_LEFT:x_right].copy()
 
 
+def process_image(crop, h_min, h_max, s_min, v_min, mm_per_grid, um_per_grid, show_baseline=True):
+    """
+    Função principal de processamento de imagem.
+    
+    Executa todo o pipeline: detecção de escalas, baseline, perfil verde,
+    pintura do vale e cálculo de área.
+    
+    Args:
+        crop: Imagem recortada do gráfico
+        h_min, h_max, s_min, v_min: Parâmetros HSV para detecção do verde
+        mm_per_grid: Milímetros por quadrado (eixo X)
+        um_per_grid: Micrômetros por quadrado (eixo Y)
+        show_baseline: Se True, desenha a linha baseline nas imagens de saída
+    
+    Returns:
+        dict: {
+            'result_img': imagem com vale pintado,
+            'mask_img': visualização da máscara verde,
+            'area_um2': área em μm²,
+            'valley_pixels': quantidade de pixels no vale,
+            'valley_data': dados detalhados do vale,
+            'y_baseline': posição Y da baseline,
+            'mm_per_pixel_x': escala X,
+            'um_per_pixel_y': escala Y,
+            'depths': lista de profundidades (μm),
+            'width_mm': largura do vale (mm),
+            'grid_area_um2': área de um quadrado em μm²
+        }
+    """
+    # Calcula escalas
+    scales = calculate_scales(crop, mm_per_grid, um_per_grid)
+    mm_per_pixel_x = scales['mm_per_pixel_x']
+    um_per_pixel_y = scales['um_per_pixel_y']
+    
+    # Encontra baseline
+    y_baseline, _ = find_baseline(crop)
+    
+    # Detecta perfil verde
+    profile, mask_green = detect_green_profile(crop, h_min, h_max, s_min, v_min)
+    
+    # Pinta vale
+    result, valley_pixels, valley_data = paint_valley(crop, profile, y_baseline, mask_green)
+    
+    # Calcula área
+    area_mm_um, area_um2 = calculate_area(valley_data, mm_per_pixel_x, um_per_pixel_y)
+    
+    # Prepara imagem resultado
+    result_img = result.copy()
+    if show_baseline:
+        cv2.line(result_img, (0, y_baseline), (result_img.shape[1], y_baseline), (0, 0, 255), 2)
+    
+    # Prepara visualização da máscara
+    mask_img = np.zeros_like(crop)
+    mask_img[mask_green > 0] = [0, 255, 0]
+    if show_baseline:
+        cv2.line(mask_img, (0, y_baseline), (mask_img.shape[1], y_baseline), (0, 0, 255), 2)
+    
+    # Calcula métricas adicionais
+    depths = []
+    width_mm = 0
+    if valley_data:
+        depths = [seg['delta_y'] * um_per_pixel_y for seg in valley_data]
+        x_pos = [seg['x'] for seg in valley_data]
+        if len(x_pos) > 1:
+            width_mm = (max(x_pos) - min(x_pos)) * mm_per_pixel_x
+    
+    # Área de um quadrado
+    grid_area_um2 = mm_per_grid * um_per_grid * 1000
+    
+    return {
+        'result_img': result_img,
+        'result_raw': result,
+        'mask_img': mask_img,
+        'area_um2': area_um2,
+        'valley_pixels': valley_pixels,
+        'valley_data': valley_data,
+        'y_baseline': y_baseline,
+        'mm_per_pixel_x': mm_per_pixel_x,
+        'um_per_pixel_y': um_per_pixel_y,
+        'depths': depths,
+        'width_mm': width_mm,
+        'grid_area_um2': grid_area_um2
+    }
+
+
 def _evaluate_params(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y, h_min, h_max, s_min, v_min):
     """Avalia uma combinação de parâmetros e retorna a área."""
     if h_max <= h_min:
@@ -304,17 +389,17 @@ def auto_adjust_parameters(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y):
         h_min, h_max = int(h_min), int(h_max)
         s_min, v_min = int(s_min), int(v_min)
         
-        # Restrições
+        # Restrições - retorna valor alto (ruim) se violadas
         if h_max <= h_min + 5:
-            return 0
+            return 1e10
         if not (30 <= h_min <= 80):
-            return 0
+            return 1e10
         if not (60 <= h_max <= 110):
-            return 0
+            return 1e10
         if not (30 <= s_min <= 220):
-            return 0
+            return 1e10
         if not (30 <= v_min <= 220):
-            return 0
+            return 1e10
         
         area = _evaluate_params(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y, h_min, h_max, s_min, v_min)
         return -area  # Negativo porque queremos maximizar
@@ -322,35 +407,49 @@ def auto_adjust_parameters(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y):
     # Ponto inicial (valores padrão)
     x0 = [GREEN_H_MIN, GREEN_H_MAX, GREEN_S_MIN, GREEN_V_MIN]
     
+    # Calcula área com parâmetros padrão primeiro
+    default_area = _evaluate_params(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y, 
+                                     GREEN_H_MIN, GREEN_H_MAX, GREEN_S_MIN, GREEN_V_MIN)
+    
     # Otimiza com Nelder-Mead
     result = minimize(
         objective,
         x0,
         method='Nelder-Mead',
         options={
-            'maxiter': 100,
-            'xatol': 1,  # Tolerância de 1 para parâmetros inteiros
-            'fatol': 0.1  # Tolerância para valor da função
+            'maxiter': 200,
+            'xatol': 1,
+            'fatol': 0.01
         }
     )
     
-    # Extrai melhores parâmetros
-    h_min = int(round(result.x[0]))
-    h_max = int(round(result.x[1]))
-    s_min = int(round(result.x[2]))
-    v_min = int(round(result.x[3]))
+    # Extrai parâmetros otimizados
+    opt_h_min = int(round(result.x[0]))
+    opt_h_max = int(round(result.x[1]))
+    opt_s_min = int(round(result.x[2]))
+    opt_v_min = int(round(result.x[3]))
     
     # Garante limites
-    h_min = max(30, min(80, h_min))
-    h_max = max(60, min(110, h_max))
-    s_min = max(30, min(220, s_min))
-    v_min = max(30, min(220, v_min))
+    opt_h_min = max(30, min(80, opt_h_min))
+    opt_h_max = max(60, min(110, opt_h_max))
+    opt_s_min = max(30, min(220, opt_s_min))
+    opt_v_min = max(30, min(220, opt_v_min))
     
-    if h_max <= h_min:
-        h_max = h_min + 10
+    if opt_h_max <= opt_h_min:
+        opt_h_max = opt_h_min + 10
     
-    # Calcula área e pixels finais
-    best_area = _evaluate_params(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y, h_min, h_max, s_min, v_min)
+    # Calcula área otimizada
+    opt_area = _evaluate_params(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y, 
+                                 opt_h_min, opt_h_max, opt_s_min, opt_v_min)
+    
+    # Compara com padrão e escolhe o melhor
+    if opt_area >= default_area:
+        h_min, h_max, s_min, v_min = opt_h_min, opt_h_max, opt_s_min, opt_v_min
+        best_area = opt_area
+    else:
+        h_min, h_max = GREEN_H_MIN, GREEN_H_MAX
+        s_min, v_min = GREEN_S_MIN, GREEN_V_MIN
+        best_area = default_area
     
     profile, mask_green = detect_green_profile(crop, h_min, h_max, s_min, v_min)
     _, valley_pixels, _ = paint_valley(crop, profile, y_baseline, mask_green)

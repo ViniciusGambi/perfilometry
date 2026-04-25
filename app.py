@@ -10,20 +10,11 @@ import io
 
 from utils import cv2_to_pil, pil_to_cv2
 from ocr import extract_axis_scale
-from processing import (
-    calculate_scales,
-    find_baseline,
-    detect_green_profile,
-    paint_valley,
-    calculate_area,
-    crop_graph,
-    auto_adjust_parameters
-)
+from processing import crop_graph, process_image, auto_adjust_parameters, calculate_scales, find_baseline
 from constants import (
     GREEN_H_MIN, GREEN_H_MAX, GREEN_S_MIN, GREEN_V_MIN,
     DEFAULT_MM_PER_GRID, DEFAULT_UM_PER_GRID
 )
-import cv2
 
 # ============================================================
 # CONFIGURAÇÃO DO STREAMLIT
@@ -108,52 +99,32 @@ if uploaded_file is not None:
         mm_per_grid = st.session_state.get('mm_per_grid', DEFAULT_MM_PER_GRID)
         um_per_grid = st.session_state.get('um_per_grid', DEFAULT_UM_PER_GRID)
         
-        # Calcula escalas e baseline (independente dos parâmetros HSV)
-        scales = calculate_scales(crop, mm_per_grid, um_per_grid)
-        mm_per_pixel_x = scales['mm_per_pixel_x']
-        um_per_pixel_y = scales['um_per_pixel_y']
-        y_baseline, _ = find_baseline(crop)
-        
         # Botão de auto-ajuste (ANTES do processamento)
         st.divider()
         auto_col, _ = st.columns([1, 7])
         with auto_col:
             if st.button("🔧 Auto-ajuste"):
                 with st.spinner("Otimizando..."):
-                    best = auto_adjust_parameters(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y)
+                    scales = calculate_scales(crop, mm_per_grid, um_per_grid)
+                    y_baseline, _ = find_baseline(crop)
+                    best = auto_adjust_parameters(crop, y_baseline, scales['mm_per_pixel_x'], scales['um_per_pixel_y'])
                     st.session_state['h_min'] = best['h_min']
                     st.session_state['h_max'] = best['h_max']
                     st.session_state['s_min'] = best['s_min']
                     st.session_state['v_min'] = best['v_min']
-                    # Atualiza variáveis locais também
-                    h_min = best['h_min']
-                    h_max = best['h_max']
-                    s_min = best['s_min']
-                    v_min = best['v_min']
+                    h_min, h_max, s_min, v_min = best['h_min'], best['h_max'], best['s_min'], best['v_min']
         
-        # Processamento (usa valores atualizados)
-        profile, mask_green = detect_green_profile(crop, h_min, h_max, s_min, v_min)
-        result, valley_pixels, valley_data = paint_valley(crop, profile, y_baseline, mask_green)
-        area_mm_um, area_um2 = calculate_area(valley_data, mm_per_pixel_x, um_per_pixel_y)
-        
-        # Prepara imagens para exibição
-        display_img = result.copy()
-        if show_baseline:
-            cv2.line(display_img, (0, y_baseline), (display_img.shape[1], y_baseline), (0, 0, 255), 2)
-        
-        mask_vis = np.zeros_like(crop)
-        mask_vis[mask_green > 0] = [0, 255, 0]
-        if show_baseline:
-            cv2.line(mask_vis, (0, y_baseline), (mask_vis.shape[1], y_baseline), (0, 0, 255), 2)
+        # Processamento principal
+        result = process_image(crop, h_min, h_max, s_min, v_min, mm_per_grid, um_per_grid, show_baseline)
         
         # Abas de visualização
         tab1, tab2 = st.tabs(["Resultado", "Máscara Verde"])
         
         with tab1:
-            st.image(cv2_to_pil(display_img), use_container_width=True)
+            st.image(cv2_to_pil(result['result_img']), use_container_width=True)
         
         with tab2:
-            st.image(cv2_to_pil(mask_vis), use_container_width=True)
+            st.image(cv2_to_pil(result['mask_img']), use_container_width=True)
         
         # Controles
         ctrl = st.columns([1, 1, 1, 1, 1, 1, 0.5])
@@ -174,32 +145,25 @@ if uploaded_file is not None:
             st.checkbox("Baseline", value=True, key="show_baseline")
         
         # Métricas
-        # Área de um quadrado: mm_per_grid * um_per_grid * 1000 = μm²
-        grid_area_um2 = mm_per_grid * um_per_grid * 1000
-        
         m_cols = st.columns([1, 1, 2, 1.5, 1.2, 0.8])
         
         with m_cols[0]:
-            st.metric("Área", f"{area_um2:.1f} μm²")
+            st.metric("Área", f"{result['area_um2']:.1f} μm²")
         with m_cols[1]:
-            st.metric("Pixels", valley_pixels)
+            st.metric("Pixels", result['valley_pixels'])
         
-        if valley_data:
-            depths = [seg['delta_y'] * um_per_pixel_y for seg in valley_data]
-            x_pos = [seg['x'] for seg in valley_data]
-            width_mm = (max(x_pos) - min(x_pos)) * mm_per_pixel_x if len(x_pos) > 1 else 0
-            
+        if result['depths']:
             with m_cols[2]:
-                st.metric("Prof (média/máx)", f"{np.mean(depths):.2f} / {max(depths):.2f} μm")
+                st.metric("Prof (média/máx)", f"{np.mean(result['depths']):.2f} / {max(result['depths']):.2f} μm")
             with m_cols[3]:
-                st.metric("Largura", f"{width_mm:.3f} mm")
+                st.metric("Largura", f"{result['width_mm']:.3f} mm")
         
         with m_cols[4]:
-            st.metric("Área/quadrado", f"{grid_area_um2:.1f} μm²")
+            st.metric("Área/quadrado", f"{result['grid_area_um2']:.1f} μm²")
         
         with m_cols[5]:
             buf = io.BytesIO()
-            cv2_to_pil(result).save(buf, format='PNG')
+            cv2_to_pil(result['result_raw']).save(buf, format='PNG')
             st.download_button("📥", buf.getvalue(), "resultado.png", "image/png")
         
         # Debug OCR
