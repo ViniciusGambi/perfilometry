@@ -87,21 +87,51 @@ if uploaded_file is not None:
     crop = crop_graph(img_original)
     
     if crop.size > 0:
+        # Inicializa valores no session_state se não existirem
+        if 'h_min' not in st.session_state:
+            st.session_state['h_min'] = GREEN_H_MIN
+        if 'h_max' not in st.session_state:
+            st.session_state['h_max'] = GREEN_H_MAX
+        if 's_min' not in st.session_state:
+            st.session_state['s_min'] = GREEN_S_MIN
+        if 'v_min' not in st.session_state:
+            st.session_state['v_min'] = GREEN_V_MIN
+        if 'show_baseline' not in st.session_state:
+            st.session_state['show_baseline'] = True
+        
         # Pega valores do session_state
-        h_min = st.session_state.get('h_min', GREEN_H_MIN)
-        h_max = st.session_state.get('h_max', GREEN_H_MAX)
-        s_min = st.session_state.get('s_min', GREEN_S_MIN)
-        v_min = st.session_state.get('v_min', GREEN_V_MIN)
-        show_baseline = st.session_state.get('show_baseline', True)
+        h_min = st.session_state['h_min']
+        h_max = st.session_state['h_max']
+        s_min = st.session_state['s_min']
+        v_min = st.session_state['v_min']
+        show_baseline = st.session_state['show_baseline']
         mm_per_grid = st.session_state.get('mm_per_grid', DEFAULT_MM_PER_GRID)
         um_per_grid = st.session_state.get('um_per_grid', DEFAULT_UM_PER_GRID)
         
-        # Processamento
+        # Calcula escalas e baseline (independente dos parâmetros HSV)
         scales = calculate_scales(crop, mm_per_grid, um_per_grid)
         mm_per_pixel_x = scales['mm_per_pixel_x']
         um_per_pixel_y = scales['um_per_pixel_y']
-        
         y_baseline, _ = find_baseline(crop)
+        
+        # Botão de auto-ajuste (ANTES do processamento)
+        st.divider()
+        auto_col, _ = st.columns([1, 7])
+        with auto_col:
+            if st.button("🔧 Auto-ajuste"):
+                with st.spinner("Otimizando..."):
+                    best = auto_adjust_parameters(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y)
+                    st.session_state['h_min'] = best['h_min']
+                    st.session_state['h_max'] = best['h_max']
+                    st.session_state['s_min'] = best['s_min']
+                    st.session_state['v_min'] = best['v_min']
+                    # Atualiza variáveis locais também
+                    h_min = best['h_min']
+                    h_max = best['h_max']
+                    s_min = best['s_min']
+                    v_min = best['v_min']
+        
+        # Processamento (usa valores atualizados)
         profile, mask_green = detect_green_profile(crop, h_min, h_max, s_min, v_min)
         result, valley_pixels, valley_data = paint_valley(crop, profile, y_baseline, mask_green)
         area_mm_um, area_um2 = calculate_area(valley_data, mm_per_pixel_x, um_per_pixel_y)
@@ -124,19 +154,6 @@ if uploaded_file is not None:
         
         with tab2:
             st.image(cv2_to_pil(mask_vis), use_container_width=True)
-        
-        # Botão de auto-ajuste (antes dos sliders)
-        st.divider()
-        auto_col, _ = st.columns([1, 7])
-        with auto_col:
-            if st.button("🔧 Auto-ajuste"):
-                with st.spinner("Otimizando..."):
-                    best = auto_adjust_parameters(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y)
-                    st.session_state['h_min'] = best['h_min']
-                    st.session_state['h_max'] = best['h_max']
-                    st.session_state['s_min'] = best['s_min']
-                    st.session_state['v_min'] = best['v_min']
-                    st.rerun()
         
         # Controles
         ctrl = st.columns([1, 1, 1, 1, 1, 1, 0.5])

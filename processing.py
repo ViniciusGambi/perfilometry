@@ -283,13 +283,10 @@ def _evaluate_params(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y, h_min, h_
 
 def auto_adjust_parameters(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y):
     """
-    Otimiza parâmetros HSV usando coordinate descent (descida por coordenadas).
+    Otimiza parâmetros HSV usando Grid Search em duas fases:
     
-    Para cada parâmetro:
-    1. Move na direção que aumenta a área
-    2. Para quando começar a diminuir
-    3. Repete para o próximo parâmetro
-    4. Repete o ciclo até convergir
+    Fase 1 (grosso): Testa combinações com passo grande para achar região
+    Fase 2 (fino): Refina com passo de 1 ao redor do melhor
     
     Args:
         crop: Imagem recortada do gráfico
@@ -300,96 +297,78 @@ def auto_adjust_parameters(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y):
     Returns:
         dict: Melhores parâmetros {'h_min', 'h_max', 's_min', 'v_min', 'area', 'pixels'}
     """
-    # Começa com valores padrão
-    params = {
+    
+    def evaluate(h_min, h_max, s_min, v_min):
+        return _evaluate_params(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y, h_min, h_max, s_min, v_min)
+    
+    # ========================================
+    # FASE 1: Grid Search Grosso
+    # ========================================
+    h_min_coarse = [40, 50, 60, 70]
+    h_max_coarse = [70, 80, 90, 100]
+    s_min_coarse = [60, 100, 140, 180]
+    v_min_coarse = [60, 100, 140, 180]
+    
+    best_params = {
         'h_min': GREEN_H_MIN,
         'h_max': GREEN_H_MAX,
         's_min': GREEN_S_MIN,
         'v_min': GREEN_V_MIN
     }
+    best_area = 0
     
-    # Limites dos parâmetros
-    limits = {
-        'h_min': (30, 70),
-        'h_max': (70, 100),
-        's_min': (30, 200),
-        'v_min': (30, 200)
-    }
+    for h_min in h_min_coarse:
+        for h_max in h_max_coarse:
+            if h_max <= h_min:
+                continue
+            for s_min in s_min_coarse:
+                for v_min in v_min_coarse:
+                    area = evaluate(h_min, h_max, s_min, v_min)
+                    if area > best_area:
+                        best_area = area
+                        best_params = {
+                            'h_min': h_min,
+                            'h_max': h_max,
+                            's_min': s_min,
+                            'v_min': v_min
+                        }
     
-    # Passos para cada parâmetro
-    steps = {
-        'h_min': 5,
-        'h_max': 5,
-        's_min': 10,
-        'v_min': 10
-    }
+    # ========================================
+    # FASE 2: Refinamento com passo de 1
+    # ========================================
+    # Define faixas ao redor do melhor (±10 para H, ±20 para S/V)
+    h_min_fine = range(max(30, best_params['h_min'] - 10), min(80, best_params['h_min'] + 11), 1)
+    h_max_fine = range(max(60, best_params['h_max'] - 10), min(110, best_params['h_max'] + 11), 1)
+    s_min_fine = range(max(30, best_params['s_min'] - 20), min(220, best_params['s_min'] + 21), 1)
+    v_min_fine = range(max(30, best_params['v_min'] - 20), min(220, best_params['v_min'] + 21), 1)
     
-    def get_area():
-        return _evaluate_params(
-            crop, y_baseline, mm_per_pixel_x, um_per_pixel_y,
-            params['h_min'], params['h_max'], params['s_min'], params['v_min']
-        )
-    
-    best_area = get_area()
-    
-    # Repete até convergir (máximo 5 iterações)
-    for iteration in range(5):
-        improved = False
-        
-        # Otimiza cada parâmetro
-        for param_name in ['h_min', 'h_max', 's_min', 'v_min']:
-            step = steps[param_name]
-            min_val, max_val = limits[param_name]
-            
-            # Tenta diminuir
-            while True:
-                new_val = params[param_name] - step
-                if new_val < min_val:
-                    break
-                
-                old_val = params[param_name]
-                params[param_name] = new_val
-                new_area = get_area()
-                
-                if new_area > best_area:
-                    best_area = new_area
-                    improved = True
-                else:
-                    params[param_name] = old_val
-                    break
-            
-            # Tenta aumentar
-            while True:
-                new_val = params[param_name] + step
-                if new_val > max_val:
-                    break
-                
-                old_val = params[param_name]
-                params[param_name] = new_val
-                new_area = get_area()
-                
-                if new_area > best_area:
-                    best_area = new_area
-                    improved = True
-                else:
-                    params[param_name] = old_val
-                    break
-        
-        # Se não melhorou nada nessa iteração, convergiu
-        if not improved:
-            break
+    for h_min in h_min_fine:
+        for h_max in h_max_fine:
+            if h_max <= h_min:
+                continue
+            for s_min in s_min_fine:
+                for v_min in v_min_fine:
+                    area = evaluate(h_min, h_max, s_min, v_min)
+                    if area > best_area:
+                        best_area = area
+                        best_params = {
+                            'h_min': h_min,
+                            'h_max': h_max,
+                            's_min': s_min,
+                            'v_min': v_min
+                        }
     
     # Calcula pixels finais
     profile, mask_green = detect_green_profile(
-        crop, params['h_min'], params['h_max'], params['s_min'], params['v_min']
+        crop, best_params['h_min'], best_params['h_max'], best_params['s_min'], best_params['v_min']
     )
     _, valley_pixels, _ = paint_valley(crop, profile, y_baseline, mask_green)
     
     return {
-        'h_min': params['h_min'],
-        'h_max': params['h_max'],
-        's_min': params['s_min'],
-        'v_min': params['v_min'],
+        'h_min': best_params['h_min'],
+        'h_max': best_params['h_max'],
+        's_min': best_params['s_min'],
+        'v_min': best_params['v_min'],
         'area': best_area,
         'pixels': valley_pixels
     }
