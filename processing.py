@@ -4,6 +4,7 @@ Funções de processamento de imagem para análise de perfilometria.
 
 import cv2
 import numpy as np
+from scipy.optimize import minimize
 
 from constants import (
     CROP_X_LEFT, CROP_X_RIGHT, CROP_Y_TOP, CROP_Y_BOTTOM,
@@ -283,10 +284,9 @@ def _evaluate_params(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y, h_min, h_
 
 def auto_adjust_parameters(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y):
     """
-    Otimiza parâmetros HSV usando Grid Search em duas fases:
+    Otimiza parâmetros HSV usando Nelder-Mead (Simplex).
     
-    Fase 1 (grosso): Testa combinações com passo grande para achar região
-    Fase 2 (fino): Refina com passo de 1 ao redor do melhor
+    Algoritmo eficiente que encontra o máximo com ~50-100 avaliações.
     
     Args:
         crop: Imagem recortada do gráfico
@@ -298,102 +298,68 @@ def auto_adjust_parameters(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y):
         dict: Melhores parâmetros {'h_min', 'h_max', 's_min', 'v_min', 'area', 'pixels'}
     """
     
-    def evaluate(h_min, h_max, s_min, v_min):
-        return _evaluate_params(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y, h_min, h_max, s_min, v_min)
-    
-    # ========================================
-    # FASE 1: Grid Search Grosso
-    # ========================================
-    h_min_coarse = [40, 50, 60, 70]
-    h_max_coarse = [70, 80, 90, 100]
-    s_min_coarse = [60, 100, 140, 180]
-    v_min_coarse = [60, 100, 140, 180]
-    
-    best_params = {
-        'h_min': GREEN_H_MIN,
-        'h_max': GREEN_H_MAX,
-        's_min': GREEN_S_MIN,
-        'v_min': GREEN_V_MIN
-    }
-    best_area = 0
-    
-    for h_min in h_min_coarse:
-        for h_max in h_max_coarse:
-            if h_max <= h_min:
-                continue
-            for s_min in s_min_coarse:
-                for v_min in v_min_coarse:
-                    area = evaluate(h_min, h_max, s_min, v_min)
-                    if area > best_area:
-                        best_area = area
-                        best_params = {
-                            'h_min': h_min,
-                            'h_max': h_max,
-                            's_min': s_min,
-                            'v_min': v_min
-                        }
-    
-    # ========================================
-    # FASE 2: Refinamento com coordinate descent (passo de 1)
-    # ========================================
-    # Muito mais rápido: otimiza um parâmetro por vez
-    
-    params = best_params.copy()
-    improved = True
-    
-    while improved:
-        improved = False
+    def objective(x):
+        """Função objetivo (negativa porque minimize minimiza)."""
+        h_min, h_max, s_min, v_min = x
+        h_min, h_max = int(h_min), int(h_max)
+        s_min, v_min = int(s_min), int(v_min)
         
-        for param_name in ['h_min', 'h_max', 's_min', 'v_min']:
-            # Define limites
-            if param_name == 'h_min':
-                min_val, max_val = 30, 75
-            elif param_name == 'h_max':
-                min_val, max_val = 65, 110
-            else:
-                min_val, max_val = 30, 220
-            
-            # Tenta diminuir
-            while params[param_name] > min_val:
-                params[param_name] -= 1
-                if param_name == 'h_min' and params['h_max'] <= params['h_min']:
-                    params[param_name] += 1
-                    break
-                area = evaluate(params['h_min'], params['h_max'], params['s_min'], params['v_min'])
-                if area > best_area:
-                    best_area = area
-                    best_params = params.copy()
-                    improved = True
-                else:
-                    params[param_name] += 1
-                    break
-            
-            # Tenta aumentar
-            while params[param_name] < max_val:
-                params[param_name] += 1
-                if param_name == 'h_max' and params['h_max'] <= params['h_min']:
-                    params[param_name] -= 1
-                    break
-                area = evaluate(params['h_min'], params['h_max'], params['s_min'], params['v_min'])
-                if area > best_area:
-                    best_area = area
-                    best_params = params.copy()
-                    improved = True
-                else:
-                    params[param_name] -= 1
-                    break
+        # Restrições
+        if h_max <= h_min + 5:
+            return 0
+        if not (30 <= h_min <= 80):
+            return 0
+        if not (60 <= h_max <= 110):
+            return 0
+        if not (30 <= s_min <= 220):
+            return 0
+        if not (30 <= v_min <= 220):
+            return 0
+        
+        area = _evaluate_params(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y, h_min, h_max, s_min, v_min)
+        return -area  # Negativo porque queremos maximizar
     
-    # Calcula pixels finais
-    profile, mask_green = detect_green_profile(
-        crop, best_params['h_min'], best_params['h_max'], best_params['s_min'], best_params['v_min']
+    # Ponto inicial (valores padrão)
+    x0 = [GREEN_H_MIN, GREEN_H_MAX, GREEN_S_MIN, GREEN_V_MIN]
+    
+    # Otimiza com Nelder-Mead
+    result = minimize(
+        objective,
+        x0,
+        method='Nelder-Mead',
+        options={
+            'maxiter': 100,
+            'xatol': 1,  # Tolerância de 1 para parâmetros inteiros
+            'fatol': 0.1  # Tolerância para valor da função
+        }
     )
+    
+    # Extrai melhores parâmetros
+    h_min = int(round(result.x[0]))
+    h_max = int(round(result.x[1]))
+    s_min = int(round(result.x[2]))
+    v_min = int(round(result.x[3]))
+    
+    # Garante limites
+    h_min = max(30, min(80, h_min))
+    h_max = max(60, min(110, h_max))
+    s_min = max(30, min(220, s_min))
+    v_min = max(30, min(220, v_min))
+    
+    if h_max <= h_min:
+        h_max = h_min + 10
+    
+    # Calcula área e pixels finais
+    best_area = _evaluate_params(crop, y_baseline, mm_per_pixel_x, um_per_pixel_y, h_min, h_max, s_min, v_min)
+    
+    profile, mask_green = detect_green_profile(crop, h_min, h_max, s_min, v_min)
     _, valley_pixels, _ = paint_valley(crop, profile, y_baseline, mask_green)
     
     return {
-        'h_min': best_params['h_min'],
-        'h_max': best_params['h_max'],
-        's_min': best_params['s_min'],
-        'v_min': best_params['v_min'],
+        'h_min': h_min,
+        'h_max': h_max,
+        's_min': s_min,
+        'v_min': v_min,
         'area': best_area,
         'pixels': valley_pixels
     }
